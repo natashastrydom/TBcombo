@@ -1,0 +1,419 @@
+---
+title: "Empirical TB model for multidrug therapy"
+subtitle: "Linear regression models of empirical data" 
+author: "Natasha Strydom"
+date: "`r Sys.Date()`"
+output:
+  html_notebook:
+    fig_caption: yes
+    number_sections: yes
+    theme: flatly
+    toc: yes
+    toc_float: yes
+---
+
+
+This document details model code and tables
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(pROC)
+library(caret)
+library(glmnet)
+library(ROCR)
+library(DescTools)
+library(broom)
+```
+
+## Session info
+```{r}
+sessionInfo()
+```
+
+```{r}
+manuscript_colors <- c('#063b4c',
+                 '#168ab2',
+                 '#4cbd97',
+                 '#ffd115',
+                 '#ed1c24',
+                 '#A17494',
+                 "navy",
+                 "steelblue",
+                 "red")
+
+
+```
+# READ DATA
+
+```{r}
+prop_relapse <- read.csv("../data/parsed/prop_relapse_2024.csv")
+```
+
+# Final model
+
+```{r}
+prop2 <- glm(DV~mean_baseline+
+                H+
+                E+
+               J+
+                L+
+                M+
+                O+
+                Pa+
+                S+
+                U+
+                Z+
+                inoc_size+
+                incubation_time_d+
+              time, data = prop_relapse, family=binomial)
+
+```
+
+# Table 1
+```{r}
+set.seed(1234)
+
+no_cfu_preds_4 = tidy(prop2, conf.int = TRUE, exponentiate = TRUE, ) %>%
+    mutate(Model = "No CFU (4 drug)") %>% 
+  mutate(sig = ifelse(p.value < 0.01, "***",
+                      ifelse(p.value < 0.05, "**",
+                             ifelse(
+                               p.value <0.1,"*", ""
+                             ))))
+
+drug_class <- read.csv("../data/parsed/drug_class.csv")
+
+no_cfu_preds_4 <- no_cfu_preds_4 %>% 
+  left_join(drug_class) %>% 
+  mutate(name = paste(type_class, term))
+
+dodger = position_dodge(width = 0.5)
+
+ggplot(filter(no_cfu_preds_4, term != "(Intercept)"), aes(y = estimate, x = reorder(name, -estimate), label = sig, colour = drug_class)) +
+        geom_pointrange(aes(ymin = conf.low, ymax = conf.high),
+                       position = dodger) +
+        geom_hline(yintercept = 1.0, linetype = "dotted") +
+  geom_text(aes( y = (estimate*2)))+
+        scale_y_log10() +
+  scale_color_manual(values = manuscript_colors)+
+        labs(y = "Odds ratio", x = "Effect") +
+        coord_flip() +
+  #facet_wrap(~type_class, scales = "free_y", nrow = 2)+
+        theme_bw()
+
+#ggsave(filename="../documents/manuscript/figures/no_CFU_model_odds.pdf",  plot=last_plot(), scale=1, width=7, height=7, units="in", dpi=400, useDingbats = F)
+
+#write.csv(no_cfu_preds_4, "../data/parsed/final_model_table.csv")
+```
+
+
+
+```{r}
+tidy_model <- tidy(prop2, conf.int = TRUE, exponentiate = TRUE)
+
+format_p_value <- function(p) {
+  if (p < 0.001) {
+    return("<0.001")
+  } else {
+    return(format(p, scientific = TRUE, digits = 2))
+  }
+}
+
+results_table <- tidy_model %>%
+  mutate(
+    odds_ratio = signif(estimate, 3),
+    conf.low = signif(conf.low, 3),
+    conf.high = signif(conf.high, 3),
+    ci = paste0("(", conf.low, ", ", conf.high, ")"),
+    p_value = sapply(p.value, format_p_value)
+  ) %>%
+  select(term, odds_ratio, ci, p_value) %>%
+  rename(
+    Predictor = term,
+    `Odds Ratio` = odds_ratio,
+    `95% CI` = ci,
+    `P-value` = p_value
+  )%>%
+  arrange((`Odds Ratio`))
+
+results_table
+```
+
+```{r}
+n_table <- prop_relapse %>% 
+  summarise(
+    H_n = sum(H),
+    E_n = sum(E),
+    J_n = sum(J),
+    L_n = sum(L),
+    M_n = sum(M),
+    O_n = sum(O),
+    Pa_n = sum(Pa),
+    S_n = sum(S),
+    U_n = sum(U),
+    Z_n = sum(Z),
+  )
+n_table
+
+format_median_range <- function(x) {
+  median_value <- signif(median(x, na.rm = TRUE), 3)
+  min_value <- signif(min(x, na.rm = TRUE), 3)
+  max_value <- signif(max(x, na.rm = TRUE), 3)
+  return(paste0(median_value, " (", min_value, ", ", max_value, ")"))
+}
+
+median_table <- prop_relapse %>% 
+  summarise(
+    mean_baseline = format_median_range(mean_baseline),
+    inoc_size = format_median_range(inoc_size),
+    incubation_time_d = format_median_range(incubation_time_d),
+    time = format_median_range(time)
+  )
+median_table
+```
+
+# Table S2
+
+```{r}
+# CFU model
+prop1 <- glm(DV ~ mean_baseline + cfu_change_assumed + time + inoc_size + incubation_time_d + drug_number, 
+             data = prop_relapse, family = binomial)
+
+# Final model
+prop2 <- glm(DV ~ mean_baseline + H + E + J + L + M + O + Pa + S + U + Z + inoc_size + incubation_time_d + time, 
+             data = prop_relapse, family = binomial)
+
+tidy_prop1 <- tidy(prop1, conf.int = TRUE, exponentiate = TRUE)
+tidy_prop2 <- tidy(prop2, conf.int = TRUE, exponentiate = TRUE)
+
+# Function to format p-values
+format_p_value <- function(p) {
+  if (p < 0.001) {
+    return("<0.001")
+  } else {
+    return(format(p, scientific = FALSE, digits = 2))
+  }
+}
+
+results_prop1 <- tidy_prop1 %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    odds_ratio = signif(estimate, 3),
+    conf.low = signif(conf.low, 3),
+    conf.high = signif(conf.high, 3),
+    ci = paste0("(", conf.low, ", ", conf.high, ")"),
+    p_value = sapply(p.value, format_p_value)
+  ) %>%
+  select(term, odds_ratio, ci, p_value) %>%
+  rename(
+    Predictor = term,
+    `Odds Ratio` = odds_ratio,
+    `95% CI` = ci,
+    `P-value` = p_value
+  )
+
+results_prop2 <- tidy_prop2 %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    odds_ratio = signif(estimate, 3),
+    conf.low = signif(conf.low, 3),
+    conf.high = signif(conf.high, 3),
+    ci = paste0("(", conf.low, ", ", conf.high, ")"),
+    p_value = sapply(p.value, format_p_value)
+  ) %>%
+  select(term, odds_ratio, ci, p_value) %>%
+  rename(
+    Predictor = term,
+    `Odds Ratio` = odds_ratio,
+    `95% CI` = ci,
+    `P-value` = p_value
+  )
+
+combined_results <- results_prop1 %>%
+  full_join(results_prop2, by = "Predictor", suffix = c("_Baseline", "_Baseline + Drugs"))
+
+# reorder
+table_order <- c("cfu_change_assumed", "time", "inoc_size", "incubation_time_d", "drug_number", "mean_baseline", "H", "E", "J", "L", "M", "O", "Pa", "S", "U", "Z")
+
+combined_results$Predictor <- factor(combined_results$Predictor, levels = table_order)
+combined_results <- combined_results %>%
+  arrange(Predictor)
+
+# Model stats
+brier_score_prop1 <- signif(BrierScore(prop1), 3)
+brier_score_prop2 <- signif(BrierScore(prop2), 3)
+aic_prop1 <- signif(AIC(prop1), 3)
+aic_prop2 <- signif(AIC(prop2), 3)
+
+
+combined_results <- combined_results %>%
+  bind_rows(
+    tibble(
+      Predictor = "AIC",
+      `Odds Ratio_Baseline` = NA,
+      `95% CI_Baseline` = NA,
+      `P-value_Baseline` = as.character(aic_prop1),
+      `Odds Ratio_Baseline + Drugs` = NA,
+      `95% CI_Baseline + Drugs` = NA,
+      `P-value_Baseline + Drugs` = as.character(aic_prop2)
+    ),
+    tibble(
+      Predictor = "Brier Score",
+      `Odds Ratio_Baseline` = NA,
+      `95% CI_Baseline` = NA,
+      `P-value_Baseline` = as.character(brier_score_prop1),
+      `Odds Ratio_Baseline + Drugs` = NA,
+      `95% CI_Baseline + Drugs` = NA,
+      `P-value_Baseline + Drugs` = as.character(brier_score_prop2)
+    )
+  )
+
+combined_results
+```
+
+
+# Table S1
+```{r}
+# Remove rows with NA, NaN, or Inf values
+prop_relapse_clean <- prop_relapse[complete.cases(prop_relapse), ]
+
+# Ensure the response variable has exactly two levels and rename levels to valid R names
+prop_relapse_clean$DV <- as.factor(prop_relapse_clean$DV)
+levels(prop_relapse_clean$DV) <- make.names(levels(prop_relapse_clean$DV))
+# Convert DV to numeric for LASSO model
+prop_relapse_clean_lasso <- prop_relapse_clean
+prop_relapse_clean_lasso$DV <- as.numeric(prop_relapse_clean_lasso$DV) - 1
+
+# Convert data to matrix for glmnet
+x <- model.matrix(DV~time+mean_baseline+drug_number+cfu_change_assumed+H+J+L+M+O+Pa+S+Z+U+R+incubation_time_d+inoc_size+JM+JL+JZ+JL,
+                  data = prop_relapse_clean_lasso)[, -1]
+y <- prop_relapse_clean_lasso$DV
+
+# Set up cross-validation
+set.seed(12345)
+train_control <- trainControl(method = "cv", number = 10, classProbs = TRUE, summaryFunction = twoClassSummary)
+
+# Fit logistic regression model with specific predictors
+logistic_model <- train(DV~time+mean_baseline+drug_number+cfu_change_assumed+H+E+J+L+M+O+Pa+S+Z+U+R+incubation_time_d+inoc_size+JM+JL+JZ+JL,
+                        data = prop_relapse_clean, 
+                        method = "glm",
+                        family = binomial,
+                        trControl = train_control,
+                        metric = "ROC")
+
+# Fit probit regression model with all predictors
+probit_model <- train(DV~time+mean_baseline+drug_number+cfu_change_assumed+H+E+J+L+M+O+Pa+S+Z+U+R+incubation_time_d+inoc_size+JM+JL+JZ+JL, 
+                      data = prop_relapse_clean, 
+                      method = "glm",
+                      family = binomial(link = "probit"),
+                      trControl = train_control,
+                      metric = "ROC")
+
+# Fit LASSO model with specified predictors
+set.seed(12345)
+lasso_model <- cv.glmnet(x, y, family = "binomial", alpha = 1)
+
+# Fit neural network model with all predictors
+set.seed(12345)
+nn_grid <- expand.grid(size = c(5), decay = c(0.1))
+nn_model <- train(DV~time+mean_baseline+drug_number+cfu_change_assumed+H+E+J+L+M+O+Pa+S+Z+U+R+incubation_time_d+inoc_size+JM+JL+JZ+JL, 
+                 data = prop_relapse_clean, 
+                 method = "nnet",
+                 trControl = train_control,
+                 tuneGrid = nn_grid,
+                 trace = FALSE,
+                 maxit = 200,
+                 metric = "ROC")
+
+# Fit random forest model with all predictors
+set.seed(12345)
+rf_model <- train(
+                     DV~time+mean_baseline+drug_number+cfu_change_assumed+H+E+J+L+M+O+Pa+S+Z+U+R+incubation_time_d+inoc_size+JM+JL+JZ+JL,
+                 data = prop_relapse_clean, 
+                 method = "rf",
+                 trControl = train_control,
+                 ntree = 500,
+                 metric = "ROC")
+
+# Fit decision tree model with all predictors
+set.seed(123)
+dt_model <- train(DV~time+mean_baseline+drug_number+cfu_change_assumed+H+E+J+L+M+O+Pa+S+Z+U+R+incubation_time_d+inoc_size+JM+JL+JZ+JL, 
+                 data = prop_relapse_clean, 
+                 method = "rpart",
+                 trControl = train_control,
+                 metric = "ROC")
+
+# Evaluate logistic regression model
+aic_logistic <- AIC(logistic_model$finalModel)
+logistic_predictions <- predict(logistic_model, prop_relapse_clean, type = "prob")[,2]
+brier_logistic <- mean((as.numeric(prop_relapse_clean$DV) - 1 - logistic_predictions)^2)
+roc_logistic <- roc(as.numeric(prop_relapse_clean$DV) - 1, logistic_predictions)
+auroc_logistic <- auc(roc_logistic)
+pred_logistic <- prediction(logistic_predictions, as.numeric(prop_relapse_clean$DV) - 1)
+perf_logistic <- performance(pred_logistic, "aucpr")
+auprc_logistic <- perf_logistic@y.values[[1]]
+
+# Evaluate probit regression model
+aic_probit <- AIC(probit_model$finalModel)
+probit_predictions <- predict(probit_model, prop_relapse_clean, type = "prob")[,2]
+brier_probit <- mean((as.numeric(prop_relapse_clean$DV) - 1 - probit_predictions)^2)
+roc_probit <- roc(as.numeric(prop_relapse_clean$DV) - 1, probit_predictions)
+auroc_probit <- auc(roc_probit)
+pred_probit <- prediction(probit_predictions, as.numeric(prop_relapse_clean$DV) - 1)
+perf_probit <- performance(pred_probit, "aucpr")
+auprc_probit <- perf_probit@y.values[[1]]
+
+# Evaluate LASSO model
+lasso_predictions <- predict(lasso_model, newx = x, s = "lambda.min", type = "response")
+brier_lasso <- mean((y - lasso_predictions)^2)
+roc_lasso <- roc(y, lasso_predictions)
+auroc_lasso <- auc(roc_lasso)
+pred_lasso <- prediction(lasso_predictions, y)
+perf_lasso <- performance(pred_lasso, "aucpr")
+auprc_lasso <- perf_lasso@y.values[[1]]
+
+# Evaluate neural network model
+nn_predictions <- predict(nn_model, prop_relapse_clean, type = "prob")[,2]
+pred_nn <- prediction(nn_predictions, as.numeric(prop_relapse_clean$DV) - 1)
+perf_nn <- performance(pred_nn, "aucpr")
+auprc_nn <- perf_nn@y.values[[1]]
+roc_nn <- roc(as.numeric(prop_relapse_clean$DV) - 1, nn_predictions)
+auroc_nn <- auc(roc_nn)
+brier_nn <- mean((as.numeric(prop_relapse_clean$DV) - 1 - nn_predictions)^2)
+
+# Evaluate random forest model
+rf_predictions <- predict(rf_model, prop_relapse_clean, type = "prob")[,2]
+pred_rf <- prediction(rf_predictions, as.numeric(prop_relapse_clean$DV) - 1)
+perf_rf <- performance(pred_rf, "aucpr")
+auprc_rf <- perf_rf@y.values[[1]]
+roc_rf <- roc(as.numeric(prop_relapse_clean$DV) - 1, rf_predictions)
+auroc_rf <- auc(roc_rf)
+brier_rf <- mean((as.numeric(prop_relapse_clean$DV) - 1 - rf_predictions)^2)
+
+# Evaluate decision tree model
+dt_predictions <- predict(dt_model, prop_relapse_clean, type = "prob")[,2]
+pred_dt <- prediction(dt_predictions, as.numeric(prop_relapse_clean$DV) - 1)
+perf_dt <- performance(pred_dt, "aucpr")
+auprc_dt <- perf_dt@y.values[[1]]
+roc_dt <- roc(as.numeric(prop_relapse_clean$DV) - 1, dt_predictions)
+auroc_dt <- auc(roc_dt)
+brier_dt <- mean((as.numeric(prop_relapse_clean$DV) - 1 - dt_predictions)^2)
+
+
+# Display results
+results <- data.frame(
+  Model = c("Logistic", "Probit", "LASSO", "Neural Network", "Random Forest", "Decision Tree"),
+  AIC = signif(c(aic_logistic, aic_probit, NA, NA, NA, NA), 3),  # AIC is not available for LASSO, Neural Network, Random Forest, and Decision Tree
+  Brier_Score = signif(c(brier_logistic, brier_probit, brier_lasso, brier_nn, brier_rf, brier_dt), 3),
+  AUROC = signif(c(auroc_logistic, auroc_probit, auroc_lasso, auroc_nn, auroc_rf, auroc_dt), 3),
+  AUCPRC = signif(c(auprc_logistic, auprc_probit, auprc_lasso, auprc_nn, auprc_rf, auprc_dt), 3)
+)
+
+
+print(results)
+```
+
+
+
+
